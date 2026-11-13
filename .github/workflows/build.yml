@@ -1,0 +1,67 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller==6.11.1
+
+      - name: Selftest (source)
+        run: python sol_checker.py --selftest
+
+      - name: Icon
+        run: python -c "from sol_checker import tray_icon_image; tray_icon_image(256).save('icon.ico', sizes=[(16,16),(24,24),(32,32),(48,48),(64,64),(128,128),(256,256)])"
+
+      - name: Build exe
+        run: >
+          pyinstaller --onefile --noconsole --name SolFastTrackChecker
+          --icon icon.ico
+          --collect-submodules winrt --collect-all windows_toasts
+          --hidden-import winrt.windows.foundation.collections --hidden-import winrt.windows.foundation --hidden-import winrt.windows.data.xml.dom --hidden-import winrt.windows.ui.notifications
+          --hidden-import win32com.propsys --hidden-import win32com.shell --hidden-import pythoncom
+          sol_checker.py
+
+      - name: Selftest (exe)
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath dist\SolFastTrackChecker.exe -ArgumentList "--selftest", "selftest.txt" -Wait -PassThru
+          Get-Content selftest.txt
+          if ($p.ExitCode -ne 0) { exit 1 }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SolFastTrackChecker
+          path: dist/SolFastTrackChecker.exe
+
+      - name: Publish release
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = python -c "import re; print(re.search(r'VERSION = \"(.+?)\"', open('sol_checker.py', encoding='utf-8').read()).group(1))"
+          $tag = "v$version"
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag dist/SolFastTrackChecker.exe --latest --title "Sol Fast Track Checker $version" --notes "Скачай SolFastTrackChecker.exe, запусти и вставь код из бота (/desktop). Инструкция — в README."
+          } else {
+            gh release upload $tag dist/SolFastTrackChecker.exe --clobber
+          }
