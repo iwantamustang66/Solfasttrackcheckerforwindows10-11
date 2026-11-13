@@ -57,7 +57,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $version = python -c "import re; print(re.search(r'VERSION = \"(.+?)\"', open('sol_checker.py', encoding='utf-8').read()).group(1))"
+          $version = (python -c "import sol_checker; print(sol_checker.VERSION)").Trim()
           $tag = "v$version"
           gh release view $tag *> $null
           if ($LASTEXITCODE -ne 0) {
