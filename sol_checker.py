@@ -1157,7 +1157,7 @@ class UI:
         frame = tk.Frame(body, bg=THEME["panel"])
         frame.pack(fill="both", expand=True, padx=self.px(10))
         text = tk.Text(frame, bd=0, highlightthickness=0, bg=THEME["panel"], fg=THEME["fg"], font=self.fonts["body"],
-                       wrap="word", width=54, padx=self.px(10), pady=self.px(8), spacing1=1, spacing3=1,
+                       wrap="word", width=52, padx=self.px(10), pady=self.px(8), spacing1=1, spacing3=1,
                        cursor="arrow", insertwidth=0)
         popup.report_text = text
         text.tag_configure("b", font=self.fonts["bold"])
@@ -1211,8 +1211,13 @@ class UI:
             if url and url.startswith("https://"):
                 self.button(buttons, label, lambda url=url: webbrowser.open(url)).pack(side="left", padx=(0, self.px(6)))
 
-        if report_path:
-            self.button(buttons, T("report"), lambda: webbrowser.open(report_path.as_uri())).pack(side="left", padx=(0, self.px(6)))
+        # «Отчёт» есть всегда (серый, пока полный отчёт не готов) — ширина окна не прыгает.
+        report_button = self.button(buttons, T("report"),
+                                    lambda: report_path and webbrowser.open(report_path.as_uri()))
+        report_button.pack(side="left", padx=(0, self.px(6)))
+
+        if not report_path:
+            report_button.configure(fg=THEME["muted"], cursor="arrow")
 
         def copy_ca():
             self.checker.seen[mint] = time.time()      # своё копирование не проверяем повторно
