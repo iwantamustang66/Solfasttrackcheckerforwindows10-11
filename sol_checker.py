@@ -11,6 +11,7 @@
 import base64
 import ctypes
 import html
+import http.client
 import json
 import os
 import queue
@@ -23,12 +24,13 @@ import urllib.error
 import urllib.request
 import webbrowser
 from pathlib import Path
+from urllib.parse import urlsplit
 
 APP_NAME = "Sol Fast Track Checker"
 APP_ID = "SolFastTrack.Checker"            # AUMID: под этим именем Windows показывает уведомления
 # Запасной AUMID, который в Windows зарегистрирован всегда (уведомления будут «от Windows PowerShell»).
 FALLBACK_APP_ID = "{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe"
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 IS_WINDOWS = sys.platform == "win32"
 
 # Контракт Solana (base58, 32–44 символа) — внутри текста или ссылки.
@@ -40,7 +42,8 @@ NOT_TOKENS = {
     "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
     "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
 }
-CLIPBOARD_POLL_SEC = 0.15
+CLIPBOARD_POLL_SEC = 0.03                 # буфер обмена — 30 раз в секунду (вызов ничего не стоит)
+WARM_EVERY_SEC = 30                       # соединения с сервером держим «тёплыми»
 REPEAT_SEC = 30                            # тот же токен повторно не проверяем 30 секунд
 MAX_CLIPBOARD_CHARS = 600                  # длинные тексты не разбираем — это не контракт
 REQUEST_TIMEOUT = 60
@@ -311,22 +314,129 @@ class ServerError(Exception):
         self.code = code
 
 
+class Connections:
+    """Постоянные HTTPS-соединения с сервером бота (keep-alive): проверка не тратит время на
+    новое TCP+TLS-соединение через полмира. Системный прокси — через urllib, как раньше."""
+
+    def __init__(self, keep=4):
+        self.keep = keep
+        self.lock = threading.Lock()
+        self.idle = {}                    # база сервера -> [соединение, ...]
+
+    @staticmethod
+    def direct(base):
+        try:
+            proxies = urllib.request.getproxies()
+        except Exception:
+            proxies = {}
+
+        scheme = urlsplit(base).scheme
+        return scheme in ("http", "https") and not proxies.get(scheme)
+
+    def open(self, base, timeout):
+        parts = urlsplit(base)
+        cls = http.client.HTTPSConnection if parts.scheme == "https" else http.client.HTTPConnection
+        return cls(parts.hostname, parts.port, timeout=timeout)
+
+    def take(self, base):
+        with self.lock:
+            pool = self.idle.get(base) or []
+            return pool.pop() if pool else None
+
+    def give(self, base, conn):
+        with self.lock:
+            pool = self.idle.setdefault(base, [])
+
+            if len(pool) < self.keep:
+                pool.append(conn)
+                return
+
+        conn.close()
+
+    def exchange(self, base, conn, path, headers, timeout):
+        conn.timeout = timeout
+
+        if conn.sock is not None:
+            conn.sock.settimeout(timeout)
+
+        prefix = urlsplit(base).path.rstrip("/")
+        conn.request("GET", prefix + path, headers=headers)
+        response = conn.getresponse()
+        body = response.read()
+
+        if response.will_close:
+            conn.close()
+        else:
+            self.give(base, conn)
+
+        return response.status, body
+
+    def get(self, base, path, headers, timeout):
+        """(HTTP-статус, тело). Соединение из пула, а если оно протухло — одна попытка с новым."""
+        if not self.direct(base):
+            request = urllib.request.Request(base + path, headers=headers)
+
+            try:
+                with urllib.request.urlopen(request, timeout=timeout) as response:
+                    return response.status, response.read()
+            except urllib.error.HTTPError as error:
+                return error.code, error.read()
+
+        conn = self.take(base)
+
+        if conn is not None:
+            try:
+                return self.exchange(base, conn, path, headers, timeout)
+            except (http.client.HTTPException, OSError):
+                conn.close()              # сервер закрыл старое соединение — пробуем новое
+
+        conn = self.open(base, timeout)
+
+        try:
+            return self.exchange(base, conn, path, headers, timeout)
+        except BaseException:
+            conn.close()
+            raise
+
+    def warm(self, base, count=2):
+        """Держать count соединений открытыми: быстрая и полная проверка идут параллельно."""
+        if not self.direct(base):
+            return
+
+        conns = [self.take(base) for _ in range(count)]
+        headers = {"User-Agent": f"SolFastTrackChecker/{VERSION}"}
+
+        for conn in conns:
+            try:
+                self.exchange(base, conn or self.open(base, 10), "/api/ping", headers, 10)
+            except Exception:
+                if conn is not None:
+                    conn.close()
+
+
+CONNECTIONS = Connections()
+
+
 def fetch_check(server, key, mint, lang, stage="full"):
-    url = f"{server}/api/check/{mint}?lang={lang}&stage={stage}"
-    request = urllib.request.Request(url, headers={"X-Api-Key": key, "User-Agent": f"SolFastTrackChecker/{VERSION}"})
+    headers = {"X-Api-Key": key, "User-Agent": f"SolFastTrackChecker/{VERSION}"}
 
     try:
-        with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as error:
-        try:
-            code = json.loads(error.read().decode("utf-8")).get("error") or str(error.code)
-        except Exception:
-            code = "unauthorized" if error.code == 401 else str(error.code)
-
-        raise ServerError(code) from None
-    except (urllib.error.URLError, TimeoutError, OSError):
+        status, body = CONNECTIONS.get(server, f"/api/check/{mint}?lang={lang}&stage={stage}", headers, REQUEST_TIMEOUT)
+    except (http.client.HTTPException, urllib.error.URLError, TimeoutError, OSError):
         raise ServerError("offline") from None
+
+    if status == 200:
+        try:
+            return json.loads(body.decode("utf-8"))
+        except Exception:
+            raise ServerError("failed") from None
+
+    try:
+        code = json.loads(body.decode("utf-8")).get("error") or str(status)
+    except Exception:
+        code = "unauthorized" if status == 401 else str(status)
+
+    raise ServerError(code)
 
 
 def download_logo(url, mint):
@@ -342,10 +452,13 @@ def download_logo(url, mint):
         return path
 
     try:
-        request = urllib.request.Request(url, headers={"User-Agent": f"SolFastTrackChecker/{VERSION}"})
+        parts = urlsplit(url)
+        base = f"{parts.scheme}://{parts.netloc}"
+        url_path = parts.path + (f"?{parts.query}" if parts.query else "")
+        status, data = CONNECTIONS.get(base, url_path, {"User-Agent": f"SolFastTrackChecker/{VERSION}"}, 10)
 
-        with urllib.request.urlopen(request, timeout=10) as response:
-            data = response.read(2_000_000)
+        if status != 200 or len(data) > 2_000_000:
+            return None
 
         if data[:8] != b"\x89PNG\r\n\x1a\n":
             return None
@@ -1279,6 +1392,19 @@ class Checker:
         self.say(self.T(key))
 
     # --- буфер обмена
+    def keep_warm(self):
+        """Раз в WARM_EVERY_SEC — лёгкий запрос к серверу: соединения открыты, проверка не ждёт TLS."""
+        while not self.stop.is_set():
+            server = self.config.get("server")
+
+            if server and not self.config.get("paused"):
+                try:
+                    CONNECTIONS.warm(server)
+                except Exception:
+                    log("warm: " + traceback.format_exc())
+
+            self.stop.wait(WARM_EVERY_SEC)
+
     def watch_clipboard(self):
         clipboard = Clipboard()
         last = clipboard.sequence()
@@ -1637,6 +1763,7 @@ class Checker:
             threading.Thread(target=self.worker, daemon=True).start()
 
         threading.Thread(target=self.watch_clipboard, daemon=True).start()
+        threading.Thread(target=self.keep_warm, daemon=True).start()
         self.say(self.T("started"))
         self.icon = pystray.Icon("SolFastTrackChecker", icon_image, APP_NAME, self.build_menu())
         log(f"started {VERSION}, window={self.window_mode()}")
