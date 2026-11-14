@@ -30,7 +30,7 @@ APP_NAME = "Sol Fast Track Checker"
 APP_ID = "SolFastTrack.Checker"            # AUMID: под этим именем Windows показывает уведомления
 # Запасной AUMID, который в Windows зарегистрирован всегда (уведомления будут «от Windows PowerShell»).
 FALLBACK_APP_ID = "{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe"
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 IS_WINDOWS = sys.platform == "win32"
 
 # Контракт Solana (base58, 32–44 символа) — внутри текста или ссылки.
@@ -43,10 +43,13 @@ NOT_TOKENS = {
     "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
 }
 CLIPBOARD_POLL_SEC = 0.03                 # буфер обмена — 30 раз в секунду (вызов ничего не стоит)
-WARM_EVERY_SEC = 30                       # соединения с сервером держим «тёплыми»
+WARM_EVERY_SEC = 15                       # соединения с сервером держим «тёплыми»
+REUSE_MAX_IDLE_SEC = 20                   # дольше простаивало — не доверяем (могли молча оборвать)
+QUICK_TIMEOUT = 12                        # быстрая проверка целиком (сервер ограничен 12 с)
+QUICK_HEDGE_SEC = 1.2                     # тёплое соединение молчит дольше — параллельно запрос по новому
 REPEAT_SEC = 30                            # тот же токен повторно не проверяем 30 секунд
 MAX_CLIPBOARD_CHARS = 600                  # длинные тексты не разбираем — это не контракт
-REQUEST_TIMEOUT = 60
+REQUEST_TIMEOUT = 45                       # полная проверка (сервер ограничен 35 с)
 REPORTS_KEEP = 60
 
 TEXTS = {
@@ -318,10 +321,10 @@ class Connections:
     """Постоянные HTTPS-соединения с сервером бота (keep-alive): проверка не тратит время на
     новое TCP+TLS-соединение через полмира. Системный прокси — через urllib, как раньше."""
 
-    def __init__(self, keep=4):
+    def __init__(self, keep=2):
         self.keep = keep
         self.lock = threading.Lock()
-        self.idle = {}                    # база сервера -> [соединение, ...]
+        self.idle = {}                    # база сервера -> [(соединение, когда вернули в пул), ...]
 
     @staticmethod
     def direct(base):
@@ -339,16 +342,34 @@ class Connections:
         return cls(parts.hostname, parts.port, timeout=timeout)
 
     def take(self, base):
+        """Свежее соединение из пула или None. Простаивавшие дольше REUSE_MAX_IDLE_SEC закрываем:
+        роутер или балансировщик мог оборвать их молча, и запрос ждал бы до таймаута."""
+        stale = []
+
         with self.lock:
             pool = self.idle.get(base) or []
-            return pool.pop() if pool else None
+            found = None
+
+            while pool:
+                conn, since = pool.pop()
+
+                if time.time() - since < REUSE_MAX_IDLE_SEC:
+                    found = conn
+                    break
+
+                stale.append(conn)
+
+        for conn in stale:
+            conn.close()
+
+        return found
 
     def give(self, base, conn):
         with self.lock:
             pool = self.idle.setdefault(base, [])
 
             if len(pool) < self.keep:
-                pool.append(conn)
+                pool.append((conn, time.time()))
                 return
 
         conn.close()
@@ -371,8 +392,9 @@ class Connections:
 
         return response.status, body
 
-    def get(self, base, path, headers, timeout):
-        """(HTTP-статус, тело). Соединение из пула, а если оно протухло — одна попытка с новым."""
+    def get(self, base, path, headers, timeout, reuse=True):
+        """(HTTP-статус, тело). reuse — тёплое соединение из пула (если оно подвело — сразу новое);
+        иначе всегда новое соединение."""
         if not self.direct(base):
             request = urllib.request.Request(base + path, headers=headers)
 
@@ -382,13 +404,13 @@ class Connections:
             except urllib.error.HTTPError as error:
                 return error.code, error.read()
 
-        conn = self.take(base)
+        conn = self.take(base) if reuse else None
 
         if conn is not None:
             try:
                 return self.exchange(base, conn, path, headers, timeout)
             except (http.client.HTTPException, OSError):
-                conn.close()              # сервер закрыл старое соединение — пробуем новое
+                conn.close()              # соединение оборвано или не ответило вовремя — пробуем новое
 
         conn = self.open(base, timeout)
 
@@ -399,7 +421,7 @@ class Connections:
             raise
 
     def warm(self, base, count=2):
-        """Держать count соединений открытыми: быстрая и полная проверка идут параллельно."""
+        """Держать count соединений открытыми и свежими (для быстрых проверок)."""
         if not self.direct(base):
             return
 
@@ -417,13 +439,57 @@ class Connections:
 CONNECTIONS = Connections()
 
 
-def fetch_check(server, key, mint, lang, stage="full"):
-    headers = {"X-Api-Key": key, "User-Agent": f"SolFastTrackChecker/{VERSION}"}
+def hedged_get(server, path, headers):
+    """Запрос по тёплому соединению; если оно молчит дольше QUICK_HEDGE_SEC (могли молча оборвать) —
+    параллельно тот же запрос по новому. Берём первый ответ."""
+    answers = queue.Queue()
 
-    try:
-        status, body = CONNECTIONS.get(server, f"/api/check/{mint}?lang={lang}&stage={stage}", headers, REQUEST_TIMEOUT)
-    except (http.client.HTTPException, urllib.error.URLError, TimeoutError, OSError):
-        raise ServerError("offline") from None
+    def attempt(reuse):
+        try:
+            answers.put(("ok", CONNECTIONS.get(server, path, headers, QUICK_TIMEOUT, reuse=reuse)))
+        except Exception as error:
+            answers.put(("error", error))
+
+    threading.Thread(target=attempt, args=(True,), daemon=True).start()
+    started, deadline = 1, time.time() + QUICK_TIMEOUT + 1
+    failures = 0
+
+    while failures < started:
+        wait = QUICK_HEDGE_SEC if started == 1 else max(0.1, deadline - time.time())
+
+        try:
+            kind, value = answers.get(timeout=wait)
+        except queue.Empty:
+            kind, value = "slow", None
+
+        if kind == "ok":
+            return value
+
+        if kind == "error":
+            failures += 1
+
+        if started == 1 and kind in ("slow", "error"):
+            threading.Thread(target=attempt, args=(False,), daemon=True).start()
+            started = 2
+        elif time.time() > deadline:
+            break
+
+    raise ServerError("offline")
+
+
+def fetch_check(server, key, mint, lang, stage="full"):
+    """Быстрая — по тёплому соединению с таймаутом QUICK_TIMEOUT и повтором по новому;
+    полная — всегда по новому соединению (она и так идёт секунды, зато без риска «мёртвого»)."""
+    headers = {"X-Api-Key": key, "User-Agent": f"SolFastTrackChecker/{VERSION}"}
+    path = f"/api/check/{mint}?lang={lang}&stage={stage}"
+
+    if stage == "quick":
+        status, body = hedged_get(server, path, headers)
+    else:
+        try:
+            status, body = CONNECTIONS.get(server, path, headers, REQUEST_TIMEOUT, reuse=False)
+        except (http.client.HTTPException, urllib.error.URLError, TimeoutError, OSError):
+            raise ServerError("offline") from None
 
     if status == 200:
         try:
@@ -455,7 +521,7 @@ def download_logo(url, mint):
         parts = urlsplit(url)
         base = f"{parts.scheme}://{parts.netloc}"
         url_path = parts.path + (f"?{parts.query}" if parts.query else "")
-        status, data = CONNECTIONS.get(base, url_path, {"User-Agent": f"SolFastTrackChecker/{VERSION}"}, 10)
+        status, data = CONNECTIONS.get(base, url_path, {"User-Agent": f"SolFastTrackChecker/{VERSION}"}, 10, reuse=False)
 
         if status != 200 or len(data) > 2_000_000:
             return None
@@ -1359,7 +1425,6 @@ class UI:
 class Checker:
     def __init__(self):
         self.config = load_config()
-        self.queue = queue.Queue()
         self.recent = []                  # [(время, mint, подпись, путь к отчёту)]
         self.seen = {}                    # mint -> когда проверяли
         self.last_notice = {}             # ошибка -> когда сообщали (не спамим)
@@ -1437,7 +1502,14 @@ class Checker:
             return
 
         self.seen[mint] = now
-        self.queue.put(mint)
+        # Каждая проверка — в своём потоке: новая монета никогда не ждёт за медленной.
+        threading.Thread(target=self.run_check, args=(mint,), daemon=True).start()
+
+    def run_check(self, mint):
+        try:
+            self.check(mint)
+        except Exception:
+            log("check: " + traceback.format_exc())
 
     def test_notification(self):
         lang = "ru" if self.config.get("lang") == "ru" else "en"
@@ -1460,15 +1532,6 @@ class Checker:
             self.submit(mint, force=True)
 
     # --- проверки
-    def worker(self):
-        while not self.stop.is_set():
-            mint = self.queue.get()
-
-            try:
-                self.check(mint)
-            except Exception:
-                log("check: " + traceback.format_exc())
-
     def check(self, mint):
         """Быстрая и полная проверка параллельно: окно — по первому ответу (обычно 1–2 с),
         полная подставляется в то же окно. Логотип подгружается в уже открытое окно."""
@@ -1758,9 +1821,6 @@ class Checker:
                 closed.wait()
             else:
                 message_box(self.T("need_code"))
-
-        for _ in range(3):
-            threading.Thread(target=self.worker, daemon=True).start()
 
         threading.Thread(target=self.watch_clipboard, daemon=True).start()
         threading.Thread(target=self.keep_warm, daemon=True).start()
