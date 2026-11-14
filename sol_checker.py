@@ -30,7 +30,7 @@ APP_NAME = "Sol Fast Track Checker"
 APP_ID = "SolFastTrack.Checker"            # AUMID: под этим именем Windows показывает уведомления
 # Запасной AUMID, который в Windows зарегистрирован всегда (уведомления будут «от Windows PowerShell»).
 FALLBACK_APP_ID = "{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe"
-VERSION = "1.3.2"
+VERSION = "1.3.3"
 IS_WINDOWS = sys.platform == "win32"
 
 # Контракт Solana (base58, 32–44 символа) — внутри текста или ссылки.
@@ -1286,7 +1286,7 @@ class UI:
     def update_report(self, popup, payload, logo_path, report_path, status=None):
         """Подставить в уже открытое окно новые данные (полную проверку вместо быстрой)."""
         if popup not in self.popups or not popup.winfo_exists():
-            return self.show_report(payload, logo_path, report_path, status=status)
+            return None                   # окно уже закрыли (✕ или само) — заново не открываем
 
         position = popup.report_text.yview()[0] if getattr(popup, "report_text", None) else 0.0
 
@@ -1568,6 +1568,10 @@ class Checker:
                 status = None if final else self.T("deep_pending")
                 card["popup"] = self.ui.call(lambda: self.ui.show_report(payload, None, None, status=status), wait=True)
 
+            if self.config.get("sound", True):
+                score = payload.get("score")
+                beep(isinstance(score, int) and score < 40)     # звук — когда окно появилось
+
             log(f"quick {mint}: {payload.get('score')} in {time.time() - started:.1f}s")
             logo = download_logo(payload.get("logo"), mint)
 
@@ -1616,13 +1620,15 @@ class Checker:
                 card["full"] = True
                 popup = card["popup"]
 
-                if popup is None:
+                opened = popup is None
+
+                if opened:
                     popup = card["popup"] = self.ui.call(lambda: self.ui.show_report(payload, None, report), wait=True)
                 else:
                     self.ui.call(lambda: self.ui.update_report(popup, payload, None, report))
 
-            if self.config.get("sound", True):
-                beep(score < 40)
+            if opened and self.config.get("sound", True):
+                beep(score < 40)                  # окна быстрой проверки не было — звук сейчас
 
             logo = download_logo(payload.get("logo"), mint)
 
@@ -2000,6 +2006,10 @@ def selftest(out_path=None):
                   "color emoji")
             widths = ui.call(lambda: popup.winfo_reqwidth(), wait=True)
             ui.call(lambda: ui.update_report(popup, DEMO_PAYLOADS["en"], logo, logo), wait=True)
+            closed = ui.call(lambda: ui.show_report(DEMO_PAYLOADS["ru"], None, None), wait=True)
+            ui.call(lambda: ui.close(closed), wait=True)
+            reopened = ui.call(lambda: ui.update_report(closed, DEMO_PAYLOADS["ru"], None, logo), wait=True)
+            check(reopened is None and closed not in ui.popups, "closed window is not reopened by the full check")
             ui.call(lambda: ui.set_logo(popup, logo, DEMO_PAYLOADS["en"]), wait=True)
             same = ui.call(lambda: popup in ui.popups and popup.winfo_exists() and popup.report_text.winfo_exists(), wait=True)
             check(same and abs(ui.call(lambda: popup.winfo_reqwidth(), wait=True) - widths) <= ui.px(4),
