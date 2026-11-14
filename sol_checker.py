@@ -1110,6 +1110,11 @@ class UI:
         except Exception:
             pass
 
+        # Картинки окна (логотип) освобождаем здесь, в потоке окон: иначе их удалит сборщик
+        # мусора из другого потока, а Tk отвечает только своему — и программа зависает.
+        popup.images = []
+        popup.logo_label = None
+        popup.report_text = None
         self.place()
 
     def button(self, parent, text, command):
@@ -2015,6 +2020,7 @@ def selftest(out_path=None):
             check(same and abs(ui.call(lambda: popup.winfo_reqwidth(), wait=True) - widths) <= ui.px(4),
                   "report window updated in place")
             ui.call(lambda: checker.settings_window(), wait=True)
+            ui.call(lambda: [ui.close(p) for p in list(ui.popups)], wait=True)
             ui.call(lambda: [w.destroy() for w in ui.root.winfo_children()], wait=True)
             check(True, "settings window")
         except Exception as error:
