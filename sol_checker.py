@@ -30,7 +30,7 @@ APP_NAME = "Sol Fast Track Checker"
 APP_ID = "SolFastTrack.Checker"            # AUMID: под этим именем Windows показывает уведомления
 # Запасной AUMID, который в Windows зарегистрирован всегда (уведомления будут «от Windows PowerShell»).
 FALLBACK_APP_ID = "{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe"
-VERSION = "1.3.1"
+VERSION = "1.3.2"
 IS_WINDOWS = sys.platform == "win32"
 
 # Контракт Solana (base58, 32–44 символа) — внутри текста или ссылки.
@@ -811,7 +811,7 @@ THEME = {
     "bg": "#16171c", "panel": "#20222a", "fg": "#e9eaef", "muted": "#8b90a0", "border": "#2e313b",
     "link": "#7fb2ff", "code": "#d2b8ff", "button": "#2b2e38", "button_hover": "#383c49",
 }
-POPUP_SECONDS = 45                         # окно само закрывается (пока курсор на нём — нет)
+POPUP_SECONDS = 15                         # окно само закрывается (пока курсор на нём — нет)
 POPUP_MAX = 3                              # одновременно на экране
 
 
@@ -1440,9 +1440,9 @@ class Checker:
         """Показывать своё окно с полной проверкой (по умолчанию) или уведомление Windows."""
         return self.ui is not None and self.config.get("mode", "window") == "window"
 
-    def say(self, text, sound=False):
+    def say(self, text, sound=False, seconds=8):
         if self.window_mode():
-            self.ui.call(lambda: self.ui.show_notice(text))
+            self.ui.call(lambda: self.ui.show_notice(text, seconds=seconds))
         elif self.notifier:
             self.notifier.show([APP_NAME, text], sound=sound)
 
@@ -1824,7 +1824,7 @@ class Checker:
 
         threading.Thread(target=self.watch_clipboard, daemon=True).start()
         threading.Thread(target=self.keep_warm, daemon=True).start()
-        self.say(self.T("started"))
+        self.say(self.T("started"), seconds=5)
         self.icon = pystray.Icon("SolFastTrackChecker", icon_image, APP_NAME, self.build_menu())
         log(f"started {VERSION}, window={self.window_mode()}")
         self.icon.run()
