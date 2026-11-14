@@ -30,7 +30,7 @@ APP_NAME = "Sol Fast Track Checker"
 APP_ID = "SolFastTrack.Checker"            # AUMID: под этим именем Windows показывает уведомления
 # Запасной AUMID, который в Windows зарегистрирован всегда (уведомления будут «от Windows PowerShell»).
 FALLBACK_APP_ID = "{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe"
-VERSION = "1.3.3"
+VERSION = "1.3.4"
 IS_WINDOWS = sys.platform == "win32"
 
 # Контракт Solana (base58, 32–44 символа) — внутри текста или ссылки.
@@ -1130,9 +1130,9 @@ class UI:
         label = tk.Label(parent, text=(" " + text) if image is not None else text, image=image, compound="left",
                          bg=THEME["button"], fg=THEME["fg"], font=self.fonts["small"],
                          padx=self.px(10), pady=self.px(5), cursor="hand2")
-        label.bind("<Button-1>", lambda _e: command())
-        label.bind("<Enter>", lambda _e: label.configure(bg=THEME["button_hover"]))
-        label.bind("<Leave>", lambda _e: label.configure(bg=THEME["button"]))
+        label.bind("<Button-1>", lambda _e=None: command())
+        label.bind("<Enter>", lambda _e=None: label.configure(bg=THEME["button_hover"]))
+        label.bind("<Leave>", lambda _e=None: label.configure(bg=THEME["button"]))
         return label
 
     def text_with_emoji(self, widget, text, tags=()):
@@ -1219,7 +1219,7 @@ class UI:
 
         close = tk.Label(row, text="✕", bg=THEME["bg"], fg=THEME["muted"], font=self.fonts["title"], cursor="hand2")
         close.pack(side="right", anchor="n")
-        close.bind("<Button-1>", lambda _e: self.close(popup))
+        close.bind("<Button-1>", lambda _e=None: self.close(popup))
         texts = tk.Frame(row, bg=THEME["bg"])
         texts.pack(side="left", fill="x", expand=True)
         self.line(texts, parts, self.fonts["title"]).pack(anchor="w", fill="x")
@@ -1279,6 +1279,10 @@ class UI:
     def show_report(self, payload, logo_path, report_path, seconds=POPUP_SECONDS, status=None):
         """Карточка с полной проверкой — тот же отчёт, что бот присылает в чат."""
         import tkinter as tk
+
+        # Новая проверка заменяет прежние окна (а не выталкивает их вверх).
+        for old in list(self.popups):
+            self.close(old)
 
         score = payload.get("score") if isinstance(payload.get("score"), int) else None
         popup, body = self.popup_frame(score_color(score), seconds)
@@ -1353,9 +1357,9 @@ class UI:
             if href:
                 name = f"link{index}"
                 text.tag_configure(name, foreground=THEME["link"], underline=True)
-                text.tag_bind(name, "<Button-1>", lambda _e, url=href: webbrowser.open(url))
-                text.tag_bind(name, "<Enter>", lambda _e: text.configure(cursor="hand2"))
-                text.tag_bind(name, "<Leave>", lambda _e: text.configure(cursor="arrow"))
+                text.tag_bind(name, "<Button-1>", lambda _e=None, url=href: webbrowser.open(url))
+                text.tag_bind(name, "<Enter>", lambda _e=None: text.configure(cursor="hand2"))
+                text.tag_bind(name, "<Leave>", lambda _e=None: text.configure(cursor="arrow"))
                 tags.append(name)
 
             self.text_with_emoji(text, chunk, tuple(tags))
@@ -1720,7 +1724,7 @@ class Checker:
             threading.Thread(target=test, daemon=True).start()
 
         save_button.configure(command=save)
-        window.bind("<Return>", lambda _e: save())
+        window.bind("<Return>", lambda _e=None: save())
         window.protocol("WM_DELETE_WINDOW", finish)
         window.update_idletasks()
         x = (window.winfo_screenwidth() - window.winfo_reqwidth()) // 2
@@ -2011,14 +2015,15 @@ def selftest(out_path=None):
                   "color emoji")
             widths = ui.call(lambda: popup.winfo_reqwidth(), wait=True)
             ui.call(lambda: ui.update_report(popup, DEMO_PAYLOADS["en"], logo, logo), wait=True)
-            closed = ui.call(lambda: ui.show_report(DEMO_PAYLOADS["ru"], None, None), wait=True)
-            ui.call(lambda: ui.close(closed), wait=True)
-            reopened = ui.call(lambda: ui.update_report(closed, DEMO_PAYLOADS["ru"], None, logo), wait=True)
-            check(reopened is None and closed not in ui.popups, "closed window is not reopened by the full check")
             ui.call(lambda: ui.set_logo(popup, logo, DEMO_PAYLOADS["en"]), wait=True)
             same = ui.call(lambda: popup in ui.popups and popup.winfo_exists() and popup.report_text.winfo_exists(), wait=True)
             check(same and abs(ui.call(lambda: popup.winfo_reqwidth(), wait=True) - widths) <= ui.px(4),
                   "report window updated in place")
+            newer = ui.call(lambda: ui.show_report(DEMO_PAYLOADS["ru"], None, None), wait=True)
+            check(ui.call(lambda: ui.popups == [newer], wait=True), "new check window replaces the old ones")
+            ui.call(lambda: ui.close(newer), wait=True)
+            reopened = ui.call(lambda: ui.update_report(newer, DEMO_PAYLOADS["ru"], None, logo), wait=True)
+            check(reopened is None and newer not in ui.popups, "closed window is not reopened by the full check")
             ui.call(lambda: checker.settings_window(), wait=True)
             ui.call(lambda: [ui.close(p) for p in list(ui.popups)], wait=True)
             ui.call(lambda: [w.destroy() for w in ui.root.winfo_children()], wait=True)
