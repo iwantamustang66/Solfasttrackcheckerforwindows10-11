@@ -30,7 +30,7 @@ APP_NAME = "Sol Fast Track Checker"
 APP_ID = "SolFastTrack.Checker"            # AUMID: под этим именем Windows показывает уведомления
 # Запасной AUMID, который в Windows зарегистрирован всегда (уведомления будут «от Windows PowerShell»).
 FALLBACK_APP_ID = "{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe"
-VERSION = "1.3.6"
+VERSION = "1.3.7"
 IS_WINDOWS = sys.platform == "win32"
 
 # Контракт Solana (base58, 32–44 символа) — внутри текста или ссылки.
@@ -1633,7 +1633,11 @@ class Checker:
                 popup, shown = card["popup"], card["payload"]
 
             if popup is not None and shown is not None:
-                self.ui.call(lambda: self.ui.update_report(popup, shown, None, None, status=self.T("deep_failed")))
+                # «⏳» быстрой проверки не должны висеть вечно — глубокая часть не пришла: «❔ н/д».
+                failed = dict(shown, report_html=str(shown.get("report_html") or "").replace(
+                    "<b>⏳</b>", "<b>❔ " + ("н/д" if lang == "ru" else "n/a") + "</b>"))
+                self.ui.call(lambda: self.ui.update_report(popup, failed, None, None, status=self.T("deep_failed")))
+                log(f"check {mint}: full failed ({error.code}) after {time.time() - started:.1f}s")
             elif error.code == "not_found":
                 pass                      # скопировали не токен (кошелёк и т.п.) — молчим
             elif error.code == "unauthorized":
@@ -1692,7 +1696,7 @@ class Checker:
         if self.icon:
             self.icon.update_menu()
 
-        log(f"check {mint}: {score} in {time.time() - started:.1f}s")
+        log(f"check {mint}: {score} in {time.time() - started:.1f}s · server {payload.get('timing')}")
 
     # --- код подключения
     def settings_window(self, closed=None):
