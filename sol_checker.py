@@ -30,7 +30,7 @@ APP_NAME = "Sol Fast Track Checker"
 APP_ID = "SolFastTrack.Checker"            # AUMID: под этим именем Windows показывает уведомления
 # Запасной AUMID, который в Windows зарегистрирован всегда (уведомления будут «от Windows PowerShell»).
 FALLBACK_APP_ID = "{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe"
-VERSION = "1.3.5"
+VERSION = "1.3.6"
 IS_WINDOWS = sys.platform == "win32"
 
 # Контракт Solana (base58, 32–44 символа) — внутри текста или ссылки.
@@ -1298,6 +1298,7 @@ class UI:
             return None                   # окно уже закрыли (✕ или само) — заново не открываем
 
         position = popup.report_text.yview()[0] if getattr(popup, "report_text", None) else 0.0
+        old_height = int(popup.report_text.cget("height")) if getattr(popup, "report_text", None) else 0
 
         for child in popup.content.winfo_children():
             child.destroy()
@@ -1305,6 +1306,10 @@ class UI:
         score = payload.get("score") if isinstance(payload.get("score"), int) else None
         popup.bar.configure(bg=score_color(score))
         self.fill_report(popup, payload, logo_path, report_path, status)
+
+        # Окно при обновлении не сжимается (только растёт, если полный отчёт длиннее).
+        if int(popup.report_text.cget("height")) < old_height:
+            popup.report_text.configure(height=old_height)
 
         if position:
             popup.report_text.yview_moveto(position)
@@ -1597,14 +1602,13 @@ class Checker:
                 log(f"quick {mint}: {error.code}")
                 return
 
-            final = payload.get("stage") != "quick"           # сервер мог сразу отдать полную
 
             with card["lock"]:
                 if card["full"]:
                     return
 
                 card["payload"] = payload
-                status = None if final else self.T("deep_pending")
+                status = None                 # места под глубокие строки сервер уже отметил «⏳»
                 card["popup"] = self.ui.call(lambda: self.ui.show_report(payload, None, None, status=status), wait=True)
 
             if self.config.get("sound", True):
