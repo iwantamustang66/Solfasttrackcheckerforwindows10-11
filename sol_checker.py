@@ -30,7 +30,7 @@ APP_NAME = "Sol Fast Track Checker"
 APP_ID = "SolFastTrack.Checker"            # AUMID: под этим именем Windows показывает уведомления
 # Запасной AUMID, который в Windows зарегистрирован всегда (уведомления будут «от Windows PowerShell»).
 FALLBACK_APP_ID = "{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe"
-VERSION = "1.3.4"
+VERSION = "1.3.5"
 IS_WINDOWS = sys.platform == "win32"
 
 # Контракт Solana (base58, 32–44 символа) — внутри текста или ссылки.
@@ -1376,10 +1376,10 @@ class UI:
         text.bind("<MouseWheel>", lambda e: (pin(), text.yview_scroll(-1 if e.delta > 0 else 1, "units"), "break")[-1])
         scroll.bind("<Button-1>", pin, add="+")
 
-        # Высота: весь отчёт, но не выше ~70% экрана (дальше — прокрутка).
-        popup.update_idletasks()
-        lines = text.count("1.0", "end", "displaylines")
-        lines = (lines[0] if isinstance(lines, tuple) else lines) or 20
+        # Высота: весь отчёт, но не выше ~70% экрана (дальше — прокрутка). Строки считаем сами по
+        # ширине шрифта: пока окно не показано, Tk не знает ширину текста и ошибается — окно
+        # появлялось высоким и потом сжималось.
+        lines = self.wrapped_lines(report_segments(payload.get("report_html")), text)
         area = work_area() or (0, 0, 1280, 800)
         line_px = self.fonts["body"].metrics("linespace") + 2
         max_lines = max(8, int((area[3] - area[1]) * 0.7 / line_px) - 6)
@@ -1415,6 +1415,36 @@ class UI:
 
         if mint:
             self.button(buttons, T("copy_ca"), copy_ca).pack(side="left")
+
+    def wrapped_lines(self, segments, text):
+        """Сколько строк займёт отчёт в поле text после переноса по словам."""
+        body, bold, code = self.fonts["body"], self.fonts["bold"], self.fonts["code"]
+        avail = int(text.cget("width")) * body.measure("0")
+        emoji_px = self.emoji.size + 2
+        lines, x = 1, 0
+
+        for chunk, is_bold, is_code, _href in segments:
+            font = code if is_code else bold if is_bold else body
+
+            for part_index, part in enumerate(chunk.split("\n")):
+                if part_index:
+                    lines, x = lines + 1, 0
+
+                for word in re.split(r"(\s+)", part):
+                    if not word:
+                        continue
+
+                    width = sum(emoji_px if is_emoji else font.measure(piece) for piece, is_emoji in split_emoji(word))
+
+                    if x + width > avail and x > 0 and not word.isspace():
+                        lines, x = lines + 1, 0
+
+                    while width > avail:              # слово длиннее строки (адрес) — рубится
+                        lines, width = lines + 1, width - avail
+
+                    x += width
+
+        return lines
 
     def show_notice(self, text, seconds=8):
         """Короткая служебная карточка (подсказка, ошибка)."""
@@ -2013,6 +2043,13 @@ def selftest(out_path=None):
             emoji = ui.emoji.pil("🔴")
             check(emoji is not None and any(r > 180 and g < 90 and b < 90 and a > 200 for r, g, b, a in emoji.getdata()),
                   "color emoji")
+            def line_counts():
+                real = popup.report_text.count("1.0", "end", "displaylines")
+                real = real[0] if isinstance(real, tuple) else real
+                return ui.wrapped_lines(report_segments(DEMO_PAYLOADS["ru"]["report_html"]), popup.report_text), real
+
+            estimated, real = ui.call(line_counts, wait=True)
+            check(abs(estimated - real) <= 1, f"window height right from the start (lines {estimated} vs {real})")
             widths = ui.call(lambda: popup.winfo_reqwidth(), wait=True)
             ui.call(lambda: ui.update_report(popup, DEMO_PAYLOADS["en"], logo, logo), wait=True)
             ui.call(lambda: ui.set_logo(popup, logo, DEMO_PAYLOADS["en"]), wait=True)
