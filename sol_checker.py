@@ -30,7 +30,7 @@ APP_NAME = "Sol Fast Track Checker"
 APP_ID = "SolFastTrack.Checker"            # AUMID: под этим именем Windows показывает уведомления
 # Запасной AUMID, который в Windows зарегистрирован всегда (уведомления будут «от Windows PowerShell»).
 FALLBACK_APP_ID = "{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe"
-VERSION = "1.3.7"
+VERSION = "1.3.8"
 IS_WINDOWS = sys.platform == "win32"
 
 # Контракт Solana (base58, 32–44 символа) — внутри текста или ссылки.
@@ -1455,6 +1455,8 @@ class UI:
         """Короткая служебная карточка (подсказка, ошибка)."""
         import tkinter as tk
 
+        log(f"notice: {text}")
+
         popup, body = self.popup_frame(THEME["link"], seconds)
         popup.images = []
         self.header(body, popup, [(APP_NAME, None)], "", None)
@@ -1535,6 +1537,7 @@ class Checker:
                 mint = extract_mint(clipboard.text())
 
                 if mint:
+                    log(f"clipboard: {mint}")
                     self.submit(mint)
             except Exception:
                 log("clipboard: " + traceback.format_exc())
@@ -1898,6 +1901,8 @@ def set_dpi_aware():
 
 
 def beep(loud=False):
+    log(f"sound: {'loud' if loud else 'normal'}")          # чтобы по журналу было видно, наш ли звук
+
     try:
         import winsound
 
